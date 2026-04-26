@@ -9,6 +9,9 @@
 # Version: 1.2.0
 ##################################################
 
+import truststore
+truststore.inject_into_ssl()
+
 import click
 import os
 from yaspin import yaspin
@@ -45,9 +48,13 @@ except ImportError:
               help="Path to the .olignore file relative to sync path (ignored if syncing from remote to local). See "
                    "fnmatch / unix filename pattern matching for information on how to use it.")
 @click.option('-v', '--verbose', 'verbose', is_flag=True, help="Enable extended error logging.")
+@click.option('--server', 'server', default=None,
+              help="Overleaf server URL (for private instances). Defaults to the URL saved at login.")
+@click.option('--no-verify', 'no_verify', is_flag=True,
+              help="Disable SSL certificate verification (use for self-signed certs).")
 @click.version_option(package_name='overleaf-sync')
 @click.pass_context
-def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path, verbose):
+def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path, verbose, server, no_verify):
     if ctx.invoked_subcommand is None:
         if not os.path.isfile(cookie_path):
             raise click.ClickException(
@@ -56,7 +63,7 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
         with open(cookie_path, 'rb') as f:
             store = pickle.load(f)
 
-        overleaf_client = OverleafClient(store["cookie"], store["csrf"])
+        overleaf_client = _make_client(store, server, no_verify)
 
         # Change the current directory to the specified sync path
         os.chdir(sync_path)
@@ -69,13 +76,6 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
             "Project could not be queried.",
             verbose)
 
-        project_infos = execute_action(
-            lambda: overleaf_client.get_project_infos(project["id"]),
-            "Querying project details",
-            "Project details queried successfully.",
-            "Project details could not be queried.",
-            verbose)
-
         zip_file = execute_action(
             lambda: zipfile.ZipFile(io.BytesIO(
                 overleaf_client.download_project(project["id"]))),
@@ -85,6 +85,13 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
             verbose)
 
         sync = not (local or remote)
+
+        project_infos = execute_action(
+            lambda: overleaf_client.get_project_infos(project["id"]),
+            "Querying project details",
+            "Project details queried successfully.",
+            "Project details could not be queried.",
+            verbose)
 
         if remote or sync:
             sync_func(
@@ -102,6 +109,10 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
                 to_name="local",
                 verbose=verbose)
         if local or sync:
+            if os.path.isfile(olignore_path):
+                click.echo("\n.olignore: using %s to filter items" % olignore_path)
+            else:
+                click.echo("\nNotice: .olignore file does not exist, will sync all items.")
             sync_func(
                 files_from=olignore_keep_list(olignore_path),
                 deleted_files=[f for f in zip_file.namelist() if f not in olignore_keep_list(olignore_path) and not sync],
@@ -121,13 +132,17 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
 @main.command()
 @click.option('--path', 'cookie_path', default=".olauth", type=click.Path(exists=False),
               help="Path to store the persisted Overleaf cookie.")
+@click.option('--server', 'server', default="https://www.overleaf.com",
+              help="Overleaf server URL (for private instances).")
+@click.option('--no-verify', 'no_verify', is_flag=True,
+              help="Disable SSL certificate verification (use for self-signed certs).")
 @click.option('-v', '--verbose', 'verbose', is_flag=True, help="Enable extended error logging.")
-def login(cookie_path, verbose):
+def login(cookie_path, server, no_verify, verbose):
     if os.path.isfile(cookie_path) and not click.confirm(
             'Persisted Overleaf cookie already exist. Do you want to override it?'):
         return
     click.clear()
-    execute_action(lambda: login_handler(cookie_path), "Login",
+    execute_action(lambda: login_handler(cookie_path, server, no_verify), "Login",
                    "Login successful. Cookie persisted as `" + click.format_filename(
                        cookie_path) + "`. You may now sync your project.",
                    "Login failed. Please try again.", verbose)
@@ -136,8 +151,12 @@ def login(cookie_path, verbose):
 @main.command(name='list')
 @click.option('--store-path', 'cookie_path', default=".olauth", type=click.Path(exists=False),
               help="Relative path to load the persisted Overleaf cookie.")
+@click.option('--server', 'server', default=None,
+              help="Overleaf server URL (for private instances). Defaults to the URL saved at login.")
+@click.option('--no-verify', 'no_verify', is_flag=True,
+              help="Disable SSL certificate verification (use for self-signed certs).")
 @click.option('-v', '--verbose', 'verbose', is_flag=True, help="Enable extended error logging.")
-def list_projects(cookie_path, verbose):
+def list_projects(cookie_path, server, no_verify, verbose):
     def query_projects():
         for index, p in enumerate(sorted(overleaf_client.all_projects(), key=lambda x: x['lastUpdated'], reverse=True)):
             if not index:
@@ -152,7 +171,7 @@ def list_projects(cookie_path, verbose):
     with open(cookie_path, 'rb') as f:
         store = pickle.load(f)
 
-    overleaf_client = OverleafClient(store["cookie"], store["csrf"])
+    overleaf_client = _make_client(store, server, no_verify)
 
     click.clear()
     execute_action(query_projects, "Querying all projects",
@@ -166,8 +185,12 @@ def list_projects(cookie_path, verbose):
 @click.option('--download-path', 'download_path', default=".", type=click.Path(exists=True))
 @click.option('--store-path', 'cookie_path', default=".olauth", type=click.Path(exists=False),
               help="Relative path to load the persisted Overleaf cookie.")
+@click.option('--server', 'server', default=None,
+              help="Overleaf server URL (for private instances). Defaults to the URL saved at login.")
+@click.option('--no-verify', 'no_verify', is_flag=True,
+              help="Disable SSL certificate verification (use for self-signed certs).")
 @click.option('-v', '--verbose', 'verbose', is_flag=True, help="Enable extended error logging.")
-def download_pdf(project_name, download_path, cookie_path, verbose):
+def download_pdf(project_name, download_path, cookie_path, server, no_verify, verbose):
     def download_project_pdf():
         nonlocal project_name
         project_name = project_name or os.path.basename(os.getcwd())
@@ -194,7 +217,7 @@ def download_pdf(project_name, download_path, cookie_path, verbose):
     with open(cookie_path, 'rb') as f:
         store = pickle.load(f)
 
-    overleaf_client = OverleafClient(store["cookie"], store["csrf"])
+    overleaf_client = _make_client(store, server, no_verify)
 
     click.clear()
 
@@ -203,10 +226,18 @@ def download_pdf(project_name, download_path, cookie_path, verbose):
                    "Downloading project's PDF failed. Please try again.", verbose)
 
 
-def login_handler(path):
-    store = olbrowserlogin.login()
+def _make_client(store, server, no_verify):
+    base_url = server or store.get("server", "https://www.overleaf.com")
+    verify = not (no_verify or store.get("no_verify", False))
+    return OverleafClient(store["cookie"], store["csrf"], base_url=base_url, verify=verify)
+
+
+def login_handler(path, base_url="https://www.overleaf.com", no_verify=False):
+    store = olbrowserlogin.login(base_url=base_url)
     if store is None:
         return False
+    store["server"] = base_url
+    store["no_verify"] = no_verify
     with open(path, 'wb+') as f:
         pickle.dump(store, f)
     return True
@@ -366,23 +397,17 @@ def olignore_keep_list(olignore_path):
     The list of files to keep synced, with support for sub-folders.
     Should only be called when syncing from local to remote.
     """
-    # get list of files recursively (ignore .* files)
     files = glob.glob('**', recursive=True)
 
-    click.echo("="*40)
     if not os.path.isfile(olignore_path):
-        click.echo("\nNotice: .olignore file does not exist, will sync all items.")
         keep_list = files
     else:
-        click.echo("\n.olignore: using %s to filter items" % olignore_path)
         with open(olignore_path, 'r') as f:
             ignore_pattern = f.read().splitlines()
-
         keep_list = [f for f in files if not any(
             fnmatch.fnmatch(f, ignore) for ignore in ignore_pattern)]
 
-    keep_list = [Path(item).as_posix() for item in keep_list if not os.path.isdir(item)]
-    return keep_list
+    return [Path(item).as_posix() for item in keep_list if not os.path.isdir(item)]
 
 
 if __name__ == "__main__":
