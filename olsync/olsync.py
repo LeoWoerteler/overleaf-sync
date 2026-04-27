@@ -99,7 +99,9 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
             sync_func(
                 files_from=zip_file.namelist(),
                 deleted_files=[f for f in olignore_keep_list(olignore_path) if f not in zip_file.namelist() and not sync],
-                create_file_at_to=lambda name: write_file(name, zip_file.read(name)),
+                create_file_at_to=lambda name: write_file(
+                    name, zip_file.read(name),
+                    mtime=dateutil.parser.isoparse(project["lastUpdated"]).timestamp()),
                 delete_file_at_to=lambda name: delete_file(name),
                 create_file_at_from=lambda name: overleaf_client.upload_file(
                     project["id"], project_infos, name, os.path.getsize(name), open(name, 'rb')),
@@ -258,17 +260,43 @@ def delete_file(path):
         os.remove(path)
 
 
-def write_file(path, content):
+def write_file(path, content, mtime=None):
     _dir = os.path.dirname(path)
     if _dir == path:
         return
 
     # path is a file
-    if _dir != '' and not os.path.exists(_dir):
-        os.makedirs(_dir)
+    new_dirs = []
+    if _dir != '':
+        d = _dir
+        while d and not os.path.exists(d):
+            new_dirs.append(d)
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        if new_dirs:
+            os.makedirs(_dir)
 
     with open(path, 'wb+') as f:
         f.write(content)
+
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+        # Stamp directories after the file write — creating a file inside a
+        # directory updates its mtime, so this must come last.
+        # Always stamp _dir (the file write touches it even if it pre-existed).
+        # Also stamp the pre-existing parent of any newly created dirs, since
+        # makedirs touching it updates its mtime too.
+        dirs_to_stamp = set(new_dirs)
+        if _dir:
+            dirs_to_stamp.add(_dir)
+        if new_dirs:
+            parent_of_new = os.path.dirname(new_dirs[-1])
+            if parent_of_new:
+                dirs_to_stamp.add(parent_of_new)
+        for d in dirs_to_stamp:
+            os.utime(d, (mtime, mtime))
 
 
 def sync_func(files_from, deleted_files, create_file_at_to, delete_file_at_to, create_file_at_from, from_exists_in_to,
@@ -415,6 +443,7 @@ def execute_action(action, progress_message, success_message, fail_message, verb
             raise click.ClickException(fail_message)
 
         return success
+
 
 
 def olignore_keep_list(olignore_path):
