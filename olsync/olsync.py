@@ -52,9 +52,11 @@ except ImportError:
               help="Overleaf server URL (for private instances). Defaults to the URL saved at login.")
 @click.option('--no-verify', 'no_verify', is_flag=True,
               help="Disable SSL certificate verification (use for self-signed certs).")
+@click.option('-d', '--dry-run', 'dry_run', is_flag=True,
+              help="Show what would be synced without making any changes.")
 @click.version_option(package_name='overleaf-sync')
 @click.pass_context
-def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path, verbose, server, no_verify):
+def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path, verbose, server, no_verify, dry_run):
     if ctx.invoked_subcommand is None:
         if not os.path.isfile(cookie_path):
             raise click.ClickException(
@@ -107,7 +109,8 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
                                                 os.path.getmtime(name),
                 from_name="remote",
                 to_name="local",
-                verbose=verbose)
+                verbose=verbose,
+                dry_run=dry_run)
         if local or sync:
             if os.path.isfile(olignore_path):
                 click.echo("\n.olignore: using %s to filter items" % olignore_path)
@@ -126,7 +129,8 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
                     project["lastUpdated"]).timestamp(),
                 from_name="local",
                 to_name="remote",
-                verbose=verbose)
+                verbose=verbose,
+                dry_run=dry_run)
 
 
 @main.command()
@@ -269,8 +273,9 @@ def write_file(path, content):
 
 def sync_func(files_from, deleted_files, create_file_at_to, delete_file_at_to, create_file_at_from, from_exists_in_to,
               from_equal_to_to, from_newer_than_to, from_name,
-              to_name, verbose=False):
-    click.echo("\nSyncing files from [%s] to [%s]" % (from_name, to_name))
+              to_name, verbose=False, dry_run=False):
+    prefix = "[DRY RUN] " if dry_run else ""
+    click.echo("\n%sSyncing files from [%s] to [%s]" % (prefix, from_name, to_name))
     click.echo('=' * 40)
 
     newly_add_list = []
@@ -284,12 +289,16 @@ def sync_func(files_from, deleted_files, create_file_at_to, delete_file_at_to, c
     for name in files_from:
         if from_exists_in_to(name):
             if not from_equal_to_to(name):
-                if not from_newer_than_to(name) and not click.confirm(
-                        '\n-> Warning: last-edit time stamp of file <%s> from [%s] is older than [%s].\nContinue to '
-                        'overwrite with an older version?' % (name, from_name, to_name)):
-                    not_sync_list.append(name)
-                    continue
-
+                if not from_newer_than_to(name):
+                    if dry_run:
+                        # In dry-run, show the potential update without prompting
+                        update_list.append(name)
+                        continue
+                    elif not click.confirm(
+                            '\n-> Warning: last-edit time stamp of file <%s> from [%s] is older than [%s].\nContinue to '
+                            'overwrite with an older version?' % (name, from_name, to_name)):
+                        not_sync_list.append(name)
+                        continue
                 update_list.append(name)
             else:
                 synced_list.append(name)
@@ -297,66 +306,79 @@ def sync_func(files_from, deleted_files, create_file_at_to, delete_file_at_to, c
             newly_add_list.append(name)
 
     for name in deleted_files:
-        delete_choice = click.prompt(
-            '\n-> Warning: file <%s> does not exist on [%s] anymore (but it still exists on [%s]).'
-            '\nShould the file be [d]eleted, [r]estored or [i]gnored?' % (name, from_name, to_name),
-            default="i",
-            type=click.Choice(['d', 'r', 'i']))
-        if delete_choice == "d":
+        if dry_run:
+            # Can't know what the user would choose; flag as needing a decision
             delete_list.append(name)
-        elif delete_choice == "r":
-            restore_list.append(name)
-        elif delete_choice == "i":
-            not_restored_list.append(name)
+        else:
+            delete_choice = click.prompt(
+                '\n-> Warning: file <%s> does not exist on [%s] anymore (but it still exists on [%s]).'
+                '\nShould the file be [d]eleted, [r]estored or [i]gnored?' % (name, from_name, to_name),
+                default="i",
+                type=click.Choice(['d', 'r', 'i']))
+            if delete_choice == "d":
+                delete_list.append(name)
+            elif delete_choice == "r":
+                restore_list.append(name)
+            elif delete_choice == "i":
+                not_restored_list.append(name)
 
     click.echo(
-        "\n[NEW] Following new file(s) created on [%s]" % to_name)
+        "\n[NEW] Following new file(s) %s on [%s]" % ("would be created" if dry_run else "created", to_name))
     for name in newly_add_list:
         click.echo("\t%s" % name)
-        try:
-            create_file_at_to(name)
-        except:
-            if verbose:
-                print(traceback.format_exc())
-            raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % to_name)
+        if not dry_run:
+            try:
+                create_file_at_to(name)
+            except:
+                if verbose:
+                    print(traceback.format_exc())
+                raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % to_name)
 
     click.echo(
-        "\n[NEW] Following new file(s) created on [%s]" % from_name)
+        "\n[NEW] Following new file(s) %s on [%s]" % ("would be created" if dry_run else "created", from_name))
     for name in restore_list:
         click.echo("\t%s" % name)
-        try:
-            create_file_at_from(name)
-        except:
-            if verbose:
-                print(traceback.format_exc())
-            raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % from_name)
+        if not dry_run:
+            try:
+                create_file_at_from(name)
+            except:
+                if verbose:
+                    print(traceback.format_exc())
+                raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % from_name)
 
     click.echo(
-        "\n[UPDATE] Following file(s) updated on [%s]" % to_name)
+        "\n[UPDATE] Following file(s) %s on [%s]" % ("would be updated" if dry_run else "updated", to_name))
     for name in update_list:
         click.echo("\t%s" % name)
-        try:
-            create_file_at_to(name)
-        except:
-            if verbose:
-                print(traceback.format_exc())
-            raise click.ClickException("\n[ERROR] An error occurred while updating file(s) on [%s]" % to_name)
+        if not dry_run:
+            try:
+                create_file_at_to(name)
+            except:
+                if verbose:
+                    print(traceback.format_exc())
+                raise click.ClickException("\n[ERROR] An error occurred while updating file(s) on [%s]" % to_name)
 
-    click.echo(
-        "\n[DELETE] Following file(s) deleted on [%s]" % to_name)
+    if dry_run:
+        click.echo(
+            "\n[PROMPT] Following file(s) are missing on [%s] and would trigger a delete/restore/ignore prompt" % from_name)
+    else:
+        click.echo(
+            "\n[DELETE] Following file(s) deleted on [%s]" % to_name)
     for name in delete_list:
         click.echo("\t%s" % name)
-        try:
-            delete_file_at_to(name)
-        except:
-            if verbose:
-                print(traceback.format_exc())
-            raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % to_name)
+        if not dry_run:
+            try:
+                delete_file_at_to(name)
+            except:
+                if verbose:
+                    print(traceback.format_exc())
+                raise click.ClickException("\n[ERROR] An error occurred while deleting file(s) on [%s]" % to_name)
 
-    click.echo(
-        "\n[SYNC] Following file(s) are up to date")
-    for name in synced_list:
-        click.echo("\t%s" % name)
+    if verbose:
+        click.echo(
+            "\n[SYNC] Following file(s) are up to date")
+        for name in synced_list:
+            click.echo("\t%s" % name)
 
     click.echo(
         "\n[SKIP] Following file(s) on [%s] have not been synced to [%s]" % (from_name, to_name))
@@ -369,7 +391,10 @@ def sync_func(files_from, deleted_files, create_file_at_to, delete_file_at_to, c
         click.echo("\t%s" % name)
 
     click.echo("")
-    click.echo("✅  Synced files from [%s] to [%s]" % (from_name, to_name))
+    if dry_run:
+        click.echo("🔍  Dry run complete — no changes were made")
+    else:
+        click.echo("✅  Synced files from [%s] to [%s]" % (from_name, to_name))
     click.echo("")
 
 
