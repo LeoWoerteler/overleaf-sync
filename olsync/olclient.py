@@ -9,11 +9,16 @@
 # Version: 1.2.0
 ##################################################
 
+import ssl
+import time
+import websocket
+from urllib.parse import urlparse
 import requests as reqs
 import urllib3
 from bs4 import BeautifulSoup
 import json
 import mimetypes
+
 PATH_SEP = "/"  # Use hardcoded path separator for both windows and posix system
 
 class OverleafClient(object):
@@ -49,16 +54,16 @@ class OverleafClient(object):
         if not verify:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         base = base_url.rstrip("/")
-        self._base_url     = base
-        self._login_url    = f"{base}/login"
-        self._project_url  = f"{base}/project"
-        self._download_url = f"{base}/project/{{}}/download/zip"
-        self._upload_url   = f"{base}/project/{{}}/upload"
-        self._folder_url   = f"{base}/project/{{}}/folder"
-        self._doc_url        = f"{base}/project/{{}}/doc"
-        self._delete_doc_url = f"{base}/project/{{}}/doc/{{}}"
+        self._base_url        = base
+        self._login_url       = f"{base}/login"
+        self._project_url     = f"{base}/project"
+        self._download_url    = f"{base}/project/{{}}/download/zip"
+        self._upload_url      = f"{base}/project/{{}}/upload"
+        self._folder_url      = f"{base}/project/{{}}/folder"
+        self._doc_url         = f"{base}/project/{{}}/doc"
+        self._delete_doc_url  = f"{base}/project/{{}}/doc/{{}}"
         self._delete_file_url = f"{base}/project/{{}}/file/{{}}"
-        self._compile_url  = f"{base}/project/{{}}/compile?enable_pdf_caching=true"
+        self._compile_url     = f"{base}/project/{{}}/compile?enable_pdf_caching=true"
 
     def login(self, username, password):
         """
@@ -155,178 +160,53 @@ class OverleafClient(object):
         else:
             raise reqs.HTTPError()
 
-    def _get_project_infos_via_browser(self, project_id):
-        """
-        Use Qt WebEngine to open the project editor in the background and
-        intercept the socket.io joinProject response.  Cookies are injected
-        via a QWebEngineUrlRequestInterceptor so they are guaranteed to reach
-        the server regardless of how the cookie store is initialised.
-        """
-        try:
-            from PySide6.QtCore import QUrl, QEventLoop, QTimer
-            from PySide6.QtWidgets import QApplication
-            from PySide6.QtWebEngineCore import (
-                QWebEnginePage, QWebEngineProfile, QWebEngineScript,
-                QWebEngineUrlRequestInterceptor,
-            )
-        except ImportError:
-            return None
-
-        cookie_header = "; ".join(
-            f"{k}={v}" for k, v in self._cookie.items()
-        ).encode()
-
-        class _CookieInjector(QWebEngineUrlRequestInterceptor):
-            def interceptRequest(self, info):  # noqa: N802
-                info.setHttpHeader(b"Cookie", cookie_header)
-
-        app = QApplication.instance() or QApplication([])
-        profile = QWebEngineProfile()
-        injector = _CookieInjector(profile)
-        profile.setUrlRequestInterceptor(injector)
-
-        intercept_js = r"""
-(function () {
-  var delim = '\ufffd';
-
-  function findRF(o) {
-    if (!o || typeof o !== 'object') return null;
-    if (Array.isArray(o)) {
-      for (var k = 0; k < o.length; k++) { var r = findRF(o[k]); if (r) return r; }
-      return null;
-    }
-    if (o.rootFolder) return o;
-    for (var key in o) { var res = findRF(o[key]); if (res) return res; }
-    return null;
-  }
-
-  function capture(text) {
-    if (!text) return;
-    var packets = text.startsWith(delim) ? [] : [text];
-    if (packets.length === 0) {
-      var s = text;
-      while (s) {
-        s = s.slice(1);
-        var end = s.indexOf(delim);
-        if (end < 0) break;
-        var len = parseInt(s.slice(0, end), 10);
-        packets.push(s.slice(end + 1, end + 1 + len));
-        s = s.slice(end + 1 + len);
-      }
-    }
-    packets.forEach(function (p) {
-      /* Socket.IO v0 packet: TYPE:ID:ENDPOINT:DATA
-         JS split(sep, limit) discards the tail, so reconstruct data manually. */
-      var colonParts = p.split(':');
-      if (colonParts.length < 4) return;
-      var type = colonParts[0];
-      var data = colonParts.slice(3).join(':');
-
-      /* socket.io ack (type 6) — some server versions */
-      if (type === '6' && data.startsWith('1+')) {
-        try {
-          var args = JSON.parse(data.slice(2));
-          if (Array.isArray(args)) {
-            for (var i = 0; i < args.length; i++) {
-              var found = findRF(args[i]);
-              if (found) { window._ols_project_infos = JSON.stringify(found); break; }
-            }
-          }
-        } catch (e) {}
-      }
-
-      /* joinProjectResponse event (type 5) — this server's pattern */
-      if (type === '5') {
-        try {
-          var ev = JSON.parse(data);
-          if (ev.name === 'joinProjectResponse' && Array.isArray(ev.args)) {
-            for (var j = 0; j < ev.args.length; j++) {
-              var found = findRF(ev.args[j]);
-              if (found) { window._ols_project_infos = JSON.stringify(found); break; }
-            }
-          }
-        } catch (e) {}
-      }
-    });
-  }
-
-  /* Intercept WebSocket transport via Proxy (survives security restrictions) */
-  if (typeof WebSocket !== 'undefined' && typeof Proxy !== 'undefined') {
-    window.WebSocket = new Proxy(WebSocket, {
-      construct: function (Target, args) {
-        var ws = new Target(...args);
-        ws.addEventListener('message', function (e) { capture(e.data); });
-        return ws;
-      }
-    });
-  }
-})();
-"""
-        script = QWebEngineScript()
-        script.setInjectionPoint(QWebEngineScript.DocumentCreation)
-        script.setWorldId(QWebEngineScript.MainWorld)
-        script.setRunsOnSubFrames(False)
-        script.setSourceCode(intercept_js)
-        profile.scripts().insert(script)
-
-        page = QWebEnginePage(profile)
-        loop = QEventLoop()
-        result = [None]
-        poll_timer = QTimer()
-        deadline_timer = QTimer()
-
-        def _poll():
-            page.runJavaScript('window._ols_project_infos || null', _got)
-
-        def _got(v):
-            if v is not None:
-                try:
-                    result[0] = json.loads(v)
-                except Exception:
-                    pass
-                _done()
-
-        def _done():
-            poll_timer.stop()
-            deadline_timer.stop()
-            loop.quit()
-
-        def _on_load(ok):
-            if not ok:
-                _done()
-                return
-            # Bail out early if the server redirected us to the login page.
-            def _check_url(url):
-                if url and '/login' in url:
-                    _done()
-            page.runJavaScript("window.location.pathname", _check_url)
-            poll_timer.timeout.connect(_poll)
-            poll_timer.start(500)
-            deadline_timer.setSingleShot(True)
-            deadline_timer.timeout.connect(_done)
-            deadline_timer.start(30_000)
-
-        page.loadFinished.connect(_on_load)
-        page.load(QUrl(f"{self._project_url}/{project_id}"))
-        loop.exec()
-
-        # Keep references alive until Qt has cleaned up.
-        del page, injector, profile
-        return result[0]
-
     def get_project_infos(self, project_id):
         """
-        Get detailed project infos about the project
+        Get detailed project info (file tree with entity IDs) via socket.io.
 
         Params:
         project_id: the id of the project
 
-        Returns: project details
+        Returns: project details (includes rootFolder tree with entity IDs)
         """
-        infos = self._get_project_infos_via_browser(project_id)
-        if infos is not None:
-            return infos
-        raise RuntimeError(f"Could not retrieve project info for {project_id}")
+        parsed = urlparse(self._base_url)
+        host = parsed.netloc
+        ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+
+        # Step 1: HTTP handshake to get a socket ID.  Using a Session ensures
+        # any load-balancer / sticky-session cookies set in the response
+        # (e.g. GCLB on overleaf.com) are automatically picked up.
+        session = reqs.Session()
+        session.cookies.update(self._cookie)
+        t = int(time.time() * 1000)
+        r = session.get(
+            f"{self._base_url}/socket.io/1/?projectId={project_id}&t={t}",
+            verify=self._verify,
+        )
+        r.raise_for_status()
+        socket_id = r.text.split(":")[0]
+
+        # Step 2: Upgrade to WebSocket, forwarding all accumulated cookies.
+        cookie_str = "; ".join(f"{c.name}={c.value}" for c in session.cookies)
+        ws_url = f"{ws_scheme}://{host}/socket.io/1/websocket/{socket_id}?projectId={project_id}"
+        sslopt = {} if self._verify else {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
+        ws = websocket.create_connection(ws_url, cookie=cookie_str, sslopt=sslopt)
+        try:
+            while True:
+                line = ws.recv()
+                if line.startswith("7:"):
+                    raise RuntimeError(
+                        f"Socket.io auth error for project {project_id} — try logging in again"
+                    )
+                if line.startswith("5:"):
+                    break
+        finally:
+            ws.close()
+
+        data = json.loads(line[len("5:"):].lstrip(":"))
+        if data.get("name") != "joinProjectResponse":
+            raise RuntimeError(f"Unexpected socket.io event {data.get('name')!r}")
+        return data["args"][0]["project"]
 
     def _resolve_folder(self, project_id, project_infos, file_name):
         """Navigate (and create if needed) the folder path for file_name.
@@ -389,7 +269,7 @@ class OverleafClient(object):
         project_id: the id of the project
         file_name: how the file will be named
 
-        Returns: True on success, False on fail
+        Returns: True on success
         """
 
         base_name = file_name.split(PATH_SEP)[-1]
