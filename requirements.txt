@@ -1,9 +1,9 @@
 requests==2.*
-urllib3
-beautifulsoup4==4.11.1
+beautifulsoup4>=4.11,<5
 yaspin==2.*
-python-dateutil~=2.8.1
+python-dateutil~=2.9
 click==8.*
 websocket-client==1.*
 PySide6==6.*
-truststore
+truststore>=0.9
+urllib3>=2

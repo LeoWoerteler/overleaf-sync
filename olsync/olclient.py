@@ -21,7 +21,7 @@ import mimetypes
 
 PATH_SEP = "/"  # Use hardcoded path separator for both windows and posix system
 
-class OverleafClient(object):
+class OverleafClient:
     """
     Overleaf API Wrapper
     Supports login, querying all projects, querying a specific project, downloading a project and
@@ -231,15 +231,14 @@ class OverleafClient(object):
                 current_folders = new_folder['folders']
         return folder_id, parts[-1]
 
-    def upload_file(self, project_id, project_infos, file_name, file_size, file):
+    def upload_file(self, project_id, project_infos, file_name):
         """
         Upload a file to the project.
 
         Params:
         project_id: the id of the project
-        file_name: how the file will be named (may include path separators)
-        file_size: the size of the file in bytes
-        file: the file object (opened in binary mode)
+        project_infos: project details from get_project_infos()
+        file_name: local path of the file to upload (may include path separators)
 
         Returns: True on success
         """
@@ -247,15 +246,16 @@ class OverleafClient(object):
 
         mime_type = mimetypes.guess_type(base_name)[0] or "application/octet-stream"
         headers = {"X-CSRF-TOKEN": self._csrf}
-        r = reqs.post(
-            self._upload_url.format(project_id),
-            cookies=self._cookie,
-            headers=headers,
-            params={"folder_id": folder_id},
-            data={"relativePath": "null", "name": base_name, "type": mime_type},
-            files={"qqfile": (base_name, file, mime_type)},
-            verify=self._verify,
-        )
+        with open(file_name, 'rb') as f:
+            r = reqs.post(
+                self._upload_url.format(project_id),
+                cookies=self._cookie,
+                headers=headers,
+                params={"folder_id": folder_id},
+                data={"relativePath": "null", "name": base_name, "type": mime_type},
+                files={"qqfile": (base_name, f, mime_type)},
+                verify=self._verify,
+            )
         r.raise_for_status()
         if not r.json().get("success"):
             raise reqs.HTTPError(f"Upload of '{file_name}' rejected by server")

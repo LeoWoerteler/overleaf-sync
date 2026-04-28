@@ -70,7 +70,7 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
         # Change the current directory to the specified sync path
         os.chdir(sync_path)
 
-        project_name = project_name or os.path.basename(os.getcwd())
+        project_name = project_name or Path.cwd().name
         project = execute_action(
             lambda: overleaf_client.get_project(project_name),
             "Querying project",
@@ -95,7 +95,7 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
 
         if verbose:
             if os.path.isfile(olignore_path):
-                click.echo("\n.olignore: using %s to filter items" % olignore_path)
+                click.echo(f"\n.olignore: using {olignore_path} to filter items")
             else:
                 click.echo("\nNotice: .olignore file does not exist, will sync all items.")
 
@@ -104,11 +104,10 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
         sync_func(
             remote_files=set(zip_file.namelist()),
             local_files=set(olignore_keep_list(olignore_path)),
-            content_equal=lambda name: os.path.isfile(name) and open(name, 'rb').read() == zip_file.read(name),
+            content_equal=lambda name: os.path.isfile(name) and Path(name).read_bytes() == zip_file.read(name),
             local_is_newer=lambda name: os.path.getmtime(name) > remote_mtime,
             download=lambda name: write_file(name, zip_file.read(name), mtime=remote_mtime),
-            upload=lambda name: overleaf_client.upload_file(
-                project["id"], project_infos, name, os.path.getsize(name), open(name, 'rb')),
+            upload=lambda name: overleaf_client.upload_file(project["id"], project_infos, name),
             delete_local=lambda name: delete_file(name),
             delete_remote=lambda name: overleaf_client.delete_file(project["id"], project_infos, name),
             local_only=local,
@@ -131,7 +130,7 @@ def login(cookie_path, server, no_verify, verbose):
         return
     click.clear()
     execute_action(lambda: login_handler(cookie_path, server, no_verify), "Login",
-                   "Cookie persisted as `" + click.format_filename(cookie_path) + "`.",
+                   f"Cookie persisted as `{click.format_filename(cookie_path)}`.",
                    "Login failed. Please try again.", verbose)
 
 
@@ -180,7 +179,7 @@ def list_projects(cookie_path, server, no_verify, verbose):
 def download_pdf(project_name, download_path, cookie_path, server, no_verify, verbose):
     def download_project_pdf():
         nonlocal project_name
-        project_name = project_name or os.path.basename(os.getcwd())
+        project_name = project_name or Path.cwd().name
         project = execute_action(
             lambda: overleaf_client.get_project(project_name),
             "Querying project",
@@ -193,7 +192,7 @@ def download_pdf(project_name, download_path, cookie_path, server, no_verify, ve
         if file_name and content:
             # Change the current directory to the specified sync path
             os.chdir(download_path)
-            open(file_name, 'wb').write(content)
+            Path(file_name).write_bytes(content)
 
         return True
 
@@ -359,33 +358,33 @@ def sync_func(remote_files, local_files, content_equal, local_is_newer,
         for name in download_list:
             try:
                 download(name)
-            except:
+            except Exception:
                 if verbose:
-                    print(traceback.format_exc())
+                    click.echo(traceback.format_exc(), err=True)
                 raise click.ClickException(f"Failed to download '{name}'")
 
         for name in upload_list:
             try:
                 upload(name)
-            except:
+            except Exception:
                 if verbose:
-                    print(traceback.format_exc())
+                    click.echo(traceback.format_exc(), err=True)
                 raise click.ClickException(f"Failed to upload '{name}'")
 
         for name in delete_remote_list:
             try:
                 delete_remote(name)
-            except:
+            except Exception:
                 if verbose:
-                    print(traceback.format_exc())
+                    click.echo(traceback.format_exc(), err=True)
                 raise click.ClickException(f"Failed to delete '{name}' from remote")
 
         for name in delete_local_list:
             try:
                 delete_local(name)
-            except:
+            except Exception:
                 if verbose:
-                    print(traceback.format_exc())
+                    click.echo(traceback.format_exc(), err=True)
                 raise click.ClickException(f"Failed to delete '{name}' locally")
 
     if dry_run:
@@ -396,9 +395,9 @@ def execute_action(action, progress_message, success_message, fail_message, verb
     with yaspin(text=progress_message, color="green") as spinner:
         try:
             success = action()
-        except:
+        except Exception:
             if verbose_error_logging:
-                print(traceback.format_exc())
+                click.echo(traceback.format_exc(), err=True)
             success = False
 
         if success:
