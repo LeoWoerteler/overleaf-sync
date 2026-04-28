@@ -74,7 +74,7 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
         project = execute_action(
             lambda: overleaf_client.get_project(project_name),
             "Querying project",
-            "Project queried successfully.",
+            "Project queried.",
             "Project could not be queried.",
             verbose)
 
@@ -82,57 +82,39 @@ def main(ctx, local, remote, project_name, cookie_path, sync_path, olignore_path
             lambda: zipfile.ZipFile(io.BytesIO(
                 overleaf_client.download_project(project["id"]))),
             "Downloading project",
-            "Project downloaded successfully.",
+            "Project downloaded.",
             "Project could not be downloaded.",
             verbose)
-
-        sync = not (local or remote)
 
         project_infos = execute_action(
             lambda: overleaf_client.get_project_infos(project["id"]),
             "Querying project details",
-            "Project details queried successfully.",
+            "Project details queried.",
             "Project details could not be queried.",
             verbose)
 
-        if remote or sync:
-            sync_func(
-                files_from=zip_file.namelist(),
-                deleted_files=[f for f in olignore_keep_list(olignore_path) if f not in zip_file.namelist() and not sync],
-                create_file_at_to=lambda name: write_file(
-                    name, zip_file.read(name),
-                    mtime=dateutil.parser.isoparse(project["lastUpdated"]).timestamp()),
-                delete_file_at_to=lambda name: delete_file(name),
-                create_file_at_from=lambda name: overleaf_client.upload_file(
-                    project["id"], project_infos, name, os.path.getsize(name), open(name, 'rb')),
-                from_exists_in_to=lambda name: os.path.isfile(name),
-                from_equal_to_to=lambda name: open(name, 'rb').read() == zip_file.read(name),
-                from_newer_than_to=lambda name: dateutil.parser.isoparse(project["lastUpdated"]).timestamp() >
-                                                os.path.getmtime(name),
-                from_name="remote",
-                to_name="local",
-                verbose=verbose,
-                dry_run=dry_run)
-        if local or sync:
+        if verbose:
             if os.path.isfile(olignore_path):
                 click.echo("\n.olignore: using %s to filter items" % olignore_path)
             else:
                 click.echo("\nNotice: .olignore file does not exist, will sync all items.")
-            sync_func(
-                files_from=olignore_keep_list(olignore_path),
-                deleted_files=[f for f in zip_file.namelist() if f not in olignore_keep_list(olignore_path) and not sync],
-                create_file_at_to=lambda name: overleaf_client.upload_file(
-                    project["id"], project_infos, name, os.path.getsize(name), open(name, 'rb')),
-                delete_file_at_to=lambda name: overleaf_client.delete_file(project["id"], project_infos, name),
-                create_file_at_from=lambda name: write_file(name, zip_file.read(name)),
-                from_exists_in_to=lambda name: name in zip_file.namelist(),
-                from_equal_to_to=lambda name: open(name, 'rb').read() == zip_file.read(name),
-                from_newer_than_to=lambda name: os.path.getmtime(name) > dateutil.parser.isoparse(
-                    project["lastUpdated"]).timestamp(),
-                from_name="local",
-                to_name="remote",
-                verbose=verbose,
-                dry_run=dry_run)
+
+        remote_mtime = dateutil.parser.isoparse(project["lastUpdated"]).timestamp()
+
+        sync_func(
+            remote_files=set(zip_file.namelist()),
+            local_files=set(olignore_keep_list(olignore_path)),
+            content_equal=lambda name: os.path.isfile(name) and open(name, 'rb').read() == zip_file.read(name),
+            local_is_newer=lambda name: os.path.getmtime(name) > remote_mtime,
+            download=lambda name: write_file(name, zip_file.read(name), mtime=remote_mtime),
+            upload=lambda name: overleaf_client.upload_file(
+                project["id"], project_infos, name, os.path.getsize(name), open(name, 'rb')),
+            delete_local=lambda name: delete_file(name),
+            delete_remote=lambda name: overleaf_client.delete_file(project["id"], project_infos, name),
+            local_only=local,
+            remote_only=remote,
+            verbose=verbose,
+            dry_run=dry_run)
 
 
 @main.command()
@@ -149,8 +131,7 @@ def login(cookie_path, server, no_verify, verbose):
         return
     click.clear()
     execute_action(lambda: login_handler(cookie_path, server, no_verify), "Login",
-                   "Login successful. Cookie persisted as `" + click.format_filename(
-                       cookie_path) + "`. You may now sync your project.",
+                   "Cookie persisted as `" + click.format_filename(cookie_path) + "`.",
                    "Login failed. Please try again.", verbose)
 
 
@@ -181,7 +162,7 @@ def list_projects(cookie_path, server, no_verify, verbose):
 
     click.clear()
     execute_action(query_projects, "Querying all projects",
-                   "Querying all projects successful.",
+                   "Projects listed.",
                    "Querying all projects failed. Please try again.", verbose)
 
 
@@ -203,7 +184,7 @@ def download_pdf(project_name, download_path, cookie_path, server, no_verify, ve
         project = execute_action(
             lambda: overleaf_client.get_project(project_name),
             "Querying project",
-            "Project queried successfully.",
+            "Project queried.",
             "Project could not be queried.",
             verbose)
 
@@ -228,7 +209,7 @@ def download_pdf(project_name, download_path, cookie_path, server, no_verify, ve
     click.clear()
 
     execute_action(download_project_pdf, "Downloading project's PDF",
-                   "Downloading project's PDF successful.",
+                   "PDF downloaded.",
                    "Downloading project's PDF failed. Please try again.", verbose)
 
 
@@ -299,131 +280,116 @@ def write_file(path, content, mtime=None):
             os.utime(d, (mtime, mtime))
 
 
-def sync_func(files_from, deleted_files, create_file_at_to, delete_file_at_to, create_file_at_from, from_exists_in_to,
-              from_equal_to_to, from_newer_than_to, from_name,
-              to_name, verbose=False, dry_run=False):
-    prefix = "[DRY RUN] " if dry_run else ""
-    click.echo("\n%sSyncing files from [%s] to [%s]" % (prefix, from_name, to_name))
-    click.echo('=' * 40)
+def sync_func(remote_files, local_files, content_equal, local_is_newer,
+              download, upload, delete_local, delete_remote,
+              local_only=False, remote_only=False, verbose=False, dry_run=False):
+    if local_only:
+        header = "local → remote"
+    elif remote_only:
+        header = "remote → local"
+    else:
+        header = "local ↔ remote"
 
-    newly_add_list = []
-    update_list = []
-    delete_list = []
-    restore_list = []
-    not_restored_list = []
-    not_sync_list = []
-    synced_list = []
+    click.echo(f"\n{'[dry run] ' if dry_run else ''}{header}")
 
-    for name in files_from:
-        if from_exists_in_to(name):
-            if not from_equal_to_to(name):
-                if not from_newer_than_to(name):
-                    if dry_run:
-                        # In dry-run, show the potential update without prompting
-                        update_list.append(name)
-                        continue
-                    elif not click.confirm(
-                            '\n-> Warning: last-edit time stamp of file <%s> from [%s] is older than [%s].\nContinue to '
-                            'overwrite with an older version?' % (name, from_name, to_name)):
-                        not_sync_list.append(name)
-                        continue
-                update_list.append(name)
+    download_list = []   # remote → local (new or update)
+    upload_list = []     # local → remote (new or update)
+    prompt_list = []     # (name, side): one-way mode, file only exists on one side
+    in_sync = []
+
+    for name in sorted(remote_files | local_files):
+        in_remote = name in remote_files
+        in_local = name in local_files
+
+        if in_remote and not in_local:
+            if local_only:
+                prompt_list.append((name, "remote"))
             else:
-                synced_list.append(name)
-        else:
-            newly_add_list.append(name)
+                download_list.append(name)
+        elif in_local and not in_remote:
+            if remote_only:
+                prompt_list.append((name, "local"))
+            else:
+                upload_list.append(name)
+        else:  # exists on both sides
+            if content_equal(name):
+                in_sync.append(name)
+            elif local_is_newer(name):
+                if not remote_only:
+                    upload_list.append(name)
+            else:
+                if not local_only:
+                    download_list.append(name)
 
-    for name in deleted_files:
+    # Resolve prompted files interactively (skipped in dry-run)
+    delete_local_list = []
+    delete_remote_list = []
+    if not dry_run:
+        for name, side in prompt_list:
+            if side == "remote":
+                if click.prompt(
+                        f'\n-> <{name}> exists on remote but not locally.'
+                        f'\n[d]elete from remote or [i]gnore?',
+                        default="i", type=click.Choice(['d', 'i'])) == "d":
+                    delete_remote_list.append(name)
+            else:
+                if click.prompt(
+                        f'\n-> <{name}> exists locally but not on remote.'
+                        f'\n[d]elete locally or [i]gnore?',
+                        default="i", type=click.Choice(['d', 'i'])) == "d":
+                    delete_local_list.append(name)
+
+    # Print compact plan
+    for name in download_list:
+        click.echo(f"  ↓  {name}")
+    for name in upload_list:
+        click.echo(f"  ↑  {name}")
+    for name, side in prompt_list:
         if dry_run:
-            # Can't know what the user would choose; flag as needing a decision
-            delete_list.append(name)
-        else:
-            delete_choice = click.prompt(
-                '\n-> Warning: file <%s> does not exist on [%s] anymore (but it still exists on [%s]).'
-                '\nShould the file be [d]eleted, [r]estored or [i]gnored?' % (name, from_name, to_name),
-                default="i",
-                type=click.Choice(['d', 'r', 'i']))
-            if delete_choice == "d":
-                delete_list.append(name)
-            elif delete_choice == "r":
-                restore_list.append(name)
-            elif delete_choice == "i":
-                not_restored_list.append(name)
+            click.echo(f"  ?  {name}  (only on {side} — will prompt)")
+    for name in delete_remote_list:
+        click.echo(f"  -  {name}  (deleted from remote)")
+    for name in delete_local_list:
+        click.echo(f"  -  {name}  (deleted locally)")
+    if in_sync:
+        click.echo(f"  {len(in_sync)} unchanged")
 
-    click.echo(
-        "\n[NEW] Following new file(s) %s on [%s]" % ("would be created" if dry_run else "created", to_name))
-    for name in newly_add_list:
-        click.echo("\t%s" % name)
-        if not dry_run:
+    # Execute
+    if not dry_run:
+        for name in download_list:
             try:
-                create_file_at_to(name)
+                download(name)
             except:
                 if verbose:
                     print(traceback.format_exc())
-                raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % to_name)
+                raise click.ClickException(f"Failed to download '{name}'")
 
-    click.echo(
-        "\n[NEW] Following new file(s) %s on [%s]" % ("would be created" if dry_run else "created", from_name))
-    for name in restore_list:
-        click.echo("\t%s" % name)
-        if not dry_run:
+        for name in upload_list:
             try:
-                create_file_at_from(name)
+                upload(name)
             except:
                 if verbose:
                     print(traceback.format_exc())
-                raise click.ClickException("\n[ERROR] An error occurred while creating new file(s) on [%s]" % from_name)
+                raise click.ClickException(f"Failed to upload '{name}'")
 
-    click.echo(
-        "\n[UPDATE] Following file(s) %s on [%s]" % ("would be updated" if dry_run else "updated", to_name))
-    for name in update_list:
-        click.echo("\t%s" % name)
-        if not dry_run:
+        for name in delete_remote_list:
             try:
-                create_file_at_to(name)
+                delete_remote(name)
             except:
                 if verbose:
                     print(traceback.format_exc())
-                raise click.ClickException("\n[ERROR] An error occurred while updating file(s) on [%s]" % to_name)
+                raise click.ClickException(f"Failed to delete '{name}' from remote")
+
+        for name in delete_local_list:
+            try:
+                delete_local(name)
+            except:
+                if verbose:
+                    print(traceback.format_exc())
+                raise click.ClickException(f"Failed to delete '{name}' locally")
 
     if dry_run:
-        click.echo(
-            "\n[PROMPT] Following file(s) are missing on [%s] and would trigger a delete/restore/ignore prompt" % from_name)
-    else:
-        click.echo(
-            "\n[DELETE] Following file(s) deleted on [%s]" % to_name)
-    for name in delete_list:
-        click.echo("\t%s" % name)
-        if not dry_run:
-            try:
-                delete_file_at_to(name)
-            except:
-                if verbose:
-                    print(traceback.format_exc())
-                raise click.ClickException("\n[ERROR] An error occurred while deleting file(s) on [%s]" % to_name)
-
-    if verbose:
-        click.echo(
-            "\n[SYNC] Following file(s) are up to date")
-        for name in synced_list:
-            click.echo("\t%s" % name)
-
-    click.echo(
-        "\n[SKIP] Following file(s) on [%s] have not been synced to [%s]" % (from_name, to_name))
-    for name in not_sync_list:
-        click.echo("\t%s" % name)
-
-    click.echo(
-        "\n[SKIP] Following file(s) on [%s] have not been synced to [%s]" % (to_name, from_name))
-    for name in not_restored_list:
-        click.echo("\t%s" % name)
-
-    click.echo("")
-    if dry_run:
-        click.echo("🔍  Dry run complete — no changes were made")
-    else:
-        click.echo("✅  Synced files from [%s] to [%s]" % (from_name, to_name))
-    click.echo("")
+        click.echo("\n  Dry run complete — no changes were made")
 
 
 def execute_action(action, progress_message, success_message, fail_message, verbose_error_logging=False):
@@ -436,13 +402,15 @@ def execute_action(action, progress_message, success_message, fail_message, verb
             success = False
 
         if success:
-            spinner.write(success_message)
-            spinner.ok("✅ ")
+            spinner.text = success_message
+            spinner.ok("✓")
         else:
-            spinner.fail("💥 ")
-            raise click.ClickException(fail_message)
+            spinner.text = fail_message
+            spinner.fail("✗")
 
-        return success
+    if not success:
+        raise click.ClickException(fail_message)
+    return success
 
 
 
